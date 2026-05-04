@@ -73,18 +73,22 @@ pipeline {
                               }
 
         stage('Push to ECR') {
-            steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
-                    sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+    steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'aws-creds',
+            usernameVariable: 'AWS_ACCESS_KEY_ID',
+            passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+        )]) {
+            sh '''
+            aws ecr get-login-password --region ${AWS_REGION} | \
+            docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    docker tag api:${BUILD_NUMBER} ${ECR_DEV}:${BUILD_NUMBER}
-                    docker push ${ECR_DEV}:${BUILD_NUMBER}
-                    '''
-                }
+            docker tag api:${BUILD_NUMBER} ${ECR_DEV}:${BUILD_NUMBER}
+            docker push ${ECR_DEV}:${BUILD_NUMBER}
+            '''
             }
-        }
+          } 
+                            }
 
         stage('EKS Check') {
             steps {
