@@ -1,16 +1,18 @@
 pipeline {
-    agent any
+    agent { label 'slave' }
 
     parameters {
         choice(name: 'QualityGate', choices: ['Pass', 'Fail'], description: 'Fail pipeline on Quality Gate')
     }
 
     environment {
+        PATH = "/opt/dependency-check/bin:/opt/sonar-scanner/bin:/usr/local/bin:${env.PATH}"
+
         AWS_REGION = 'ap-south-1'
         ACCOUNT_ID = '475790160792'
 
         IMAGE_NAME = 'web'
-        IMAGE_TAG = "${GIT_COMMIT.take(7)}-${BUILD_NUMBER}"
+        IMAGE_TAG = "${BUILD_NUMBER}"
 
         ECR_DEV = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-dev"
         ECR_PROD = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-prod"
@@ -122,7 +124,7 @@ pipeline {
                 rm -rf application-helm-charts || true
                 git clone ${HELM_REPO}
 
-                kube-linter lint application-helm-charts/application-helmcharts/web
+                kube-linter lint application-helm-charts/web
                 """
             }
         }
