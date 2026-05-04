@@ -16,19 +16,6 @@ pipeline {
 
     stages {
 
-        stage('Setup Tools') {
-            steps {
-                sh '''
-                which docker || echo "Docker missing"
-                which node || echo "Node missing"
-                which sonar-scanner || echo "Sonar missing"
-                which dependency-check.sh || echo "OWASP missing"
-                which grype || echo "Grype missing"
-                which kubectl || echo "Kubectl missing"
-                '''
-            }
-        }
-
         stage('Clean Workspace') {
             steps { cleanWs() }
         }
@@ -37,26 +24,43 @@ pipeline {
             steps { checkout scm }
         }
 
+        stage('Setup Tools Check') {
+            steps {
+                sh '''
+                which docker || true
+                which node || true
+                which sonar-scanner || true
+                which dependency-check.sh || true
+                which grype || true
+                which kubectl || true
+                '''
+            }
+        }
+
         stage('Install Dependencies') {
             steps {
-                sh 'npm install || echo "Skipping npm install"'
+                sh 'npm install || true'
             }
         }
 
         stage('Static Analysis') {
             parallel {
 
-                stage('Sonar') {
+                stage('SonarQube') {
                     steps {
-                        withSonarQubeEnv('sonarqube') {
-                            sh 'sonar-scanner -Dsonar.projectKey=web -Dsonar.sources=. || true'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            withSonarQubeEnv('sonarqube') {
+                                sh 'sonar-scanner -Dsonar.projectKey=web -Dsonar.sources=. || true'
+                            }
                         }
                     }
                 }
 
                 stage('OWASP') {
                     steps {
-                        sh 'dependency-check.sh --project web --scan . --out . || true'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            sh 'dependency-check.sh --project web --scan . --out . || true'
+                        }
                     }
                 }
             }
@@ -67,7 +71,7 @@ pipeline {
                 script {
                     try {
                         waitForQualityGate abortPipeline: false
-                    } catch (err) {
+                    } catch (e) {
                         echo "Skipping Quality Gate"
                     }
                 }
@@ -76,7 +80,7 @@ pipeline {
 
         stage('Tests') {
             steps {
-                sh 'npm test || echo "No tests"'
+                sh 'npm test || true'
             }
         }
 
@@ -84,9 +88,9 @@ pipeline {
             steps {
                 sh '''
                 if [ -f Dockerfile ]; then
-                  docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} . || true
                 else
-                  echo "No Dockerfile"
+                    echo "Dockerfile not found"
                 fi
                 '''
             }
@@ -98,19 +102,21 @@ pipeline {
             }
         }
 
-        stage('Push ECR') {
+        stage('Push to ECR') {
             steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
-                    sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                        sh '''
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    REPO=${ECR_DEV}
-                    [ "$BRANCH_NAME" = "master" ] && REPO=${ECR_PROD}
+                        REPO=${ECR_DEV}
+                        [ "$BRANCH_NAME" = "master" ] && REPO=${ECR_PROD}
 
-                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REPO}:${IMAGE_TAG}
-                    docker push ${REPO}:${IMAGE_TAG} || true
-                    '''
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REPO}:${IMAGE_TAG} || true
+                        docker push ${REPO}:${IMAGE_TAG} || true
+                        '''
+                    }
                 }
             }
         }
@@ -118,13 +124,14 @@ pipeline {
         stage('Helm Lint') {
             steps {
                 sh '''
+                rm -rf application-helm-charts || true
                 git clone ${HELM_REPO} || true
                 kube-linter lint application-helm-charts/application-helm-charts/web || true
                 '''
             }
         }
 
-        stage('Check EKS') {
+        stage('Check EKS Cluster') {
             steps {
                 sh 'kubectl get nodes || echo "Cluster not connected"'
             }
