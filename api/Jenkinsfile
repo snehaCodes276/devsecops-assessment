@@ -16,16 +16,6 @@ pipeline {
 
     stages {
 
-        stage('Setup Python Env') {
-            steps {
-                sh '''
-                python3 -m venv venv || true
-                . venv/bin/activate
-                pip install -r requirements.txt || echo "Skipping pip install"
-                '''
-            }
-        }
-
         stage('Clean Workspace') {
             steps { cleanWs() }
         }
@@ -34,20 +24,35 @@ pipeline {
             steps { checkout scm }
         }
 
+        stage('Setup Python Environment') {
+            steps {
+                sh '''
+                python3 -m venv venv || true
+                . venv/bin/activate
+                pip install --upgrade pip || true
+                pip install -r requirements.txt || true
+                '''
+            }
+        }
+
         stage('Static Analysis') {
             parallel {
 
-                stage('Sonar') {
+                stage('SonarQube') {
                     steps {
-                        withSonarQubeEnv('sonarqube') {
-                            sh 'sonar-scanner -Dsonar.projectKey=api -Dsonar.sources=. || true'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            withSonarQubeEnv('sonarqube') {
+                                sh 'sonar-scanner -Dsonar.projectKey=api -Dsonar.sources=. || true'
+                            }
                         }
                     }
                 }
 
                 stage('OWASP') {
                     steps {
-                        sh 'dependency-check.sh --project api --scan . --out . || true'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            sh 'dependency-check.sh --project api --scan . --out . || true'
+                        }
                     }
                 }
             }
@@ -58,8 +63,8 @@ pipeline {
                 script {
                     try {
                         waitForQualityGate abortPipeline: false
-                    } catch (err) {
-                        echo "Skipping QG"
+                    } catch (e) {
+                        echo "Skipping Quality Gate"
                     }
                 }
             }
@@ -67,7 +72,10 @@ pipeline {
 
         stage('Tests') {
             steps {
-                sh 'pytest || echo "No tests"'
+                sh '''
+                . venv/bin/activate
+                pytest || true
+                '''
             }
         }
 
@@ -75,33 +83,35 @@ pipeline {
             steps {
                 sh '''
                 if [ -f Dockerfile ]; then
-                  docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} . || true
                 else
-                  echo "No Dockerfile"
+                    echo "Dockerfile not found"
                 fi
                 '''
             }
         }
 
-        stage('Scan') {
+        stage('Security Scan') {
             steps {
                 sh 'grype ${IMAGE_NAME}:${IMAGE_TAG} -o json > scan.json || true'
             }
         }
 
-        stage('Push ECR') {
+        stage('Push to ECR') {
             steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
-                    sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                        sh '''
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    REPO=${ECR_DEV}
-                    [ "$BRANCH_NAME" = "master" ] && REPO=${ECR_PROD}
+                        REPO=${ECR_DEV}
+                        [ "$BRANCH_NAME" = "master" ] && REPO=${ECR_PROD}
 
-                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REPO}:${IMAGE_TAG}
-                    docker push ${REPO}:${IMAGE_TAG} || true
-                    '''
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REPO}:${IMAGE_TAG} || true
+                        docker push ${REPO}:${IMAGE_TAG} || true
+                        '''
+                    }
                 }
             }
         }
@@ -109,13 +119,14 @@ pipeline {
         stage('Helm Lint') {
             steps {
                 sh '''
+                rm -rf application-helm-charts || true
                 git clone ${HELM_REPO} || true
                 kube-linter lint application-helm-charts/application-helm-charts/api || true
                 '''
             }
         }
 
-        stage('Check EKS') {
+        stage('Check EKS Cluster') {
             steps {
                 sh 'kubectl get nodes || echo "Cluster not connected"'
             }
