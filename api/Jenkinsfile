@@ -12,8 +12,8 @@ pipeline {
         HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
     }
     tools {
-    sonarRunner 'sonar-scanner'
-}
+          sonarRunner 'sonar-scanner'
+    }
 
     stages {
 
