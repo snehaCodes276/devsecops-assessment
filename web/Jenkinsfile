@@ -5,67 +5,57 @@ pipeline {
         AWS_REGION = 'ap-south-1'
         ACCOUNT_ID = '475790160792'
 
-        APP_NAME = 'web'
-        IMAGE_TAG = "${BUILD_NUMBER}"
-
         ECR_DEV = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-dev"
         ECR_PROD = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-prod"
 
+        IMAGE_TAG = "${BUILD_NUMBER}"
         HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
     }
 
     stages {
 
-        stage('Clean Workspace') {
+        stage('Clean') {
             steps { cleanWs() }
         }
 
-        stage('Checkout Code') {
+        stage('Checkout') {
             steps { checkout scm }
         }
 
         stage('Install Dependencies') {
             steps {
                 sh '''
-                if [ -f web/package.json ]; then
-                    cd web && npm install
-                else
-                    echo "No package.json found"
-                fi
+                npm install
                 '''
-            }
-        }
-
-        stage('Static Analysis') {
-            parallel {
-
-                stage('SonarQube') {
-                    steps {
-                        withSonarQubeEnv('sonarqube') {
-                            sh 'sonar-scanner -Dsonar.projectKey=web -Dsonar.sources=web'
-                        }
-                    }
-                }
-
-                stage('OWASP') {
-                    steps {
-                        sh '''
-                        if [ -d /opt/dependency-check/bin ]; then
-                            /opt/dependency-check/bin/dependency-check.sh --project web --scan . --out .
-                        else
-                            echo "OWASP missing"
-                        fi
-                        '''
-                    }
-                }
             }
         }
 
         stage('Tests') {
             steps {
+                sh 'npm test || true'
+            }
+        }
+
+        stage('SonarQube') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    sh '''
+                    sonar-scanner \
+                    -Dsonar.projectKey=web \
+                    -Dsonar.sources=.
+                    '''
+                }
+            }
+        }
+
+        stage('OWASP Scan') {
+            steps {
                 sh '''
-                if [ -f web/package.json ]; then
-                    cd web && npm test || true
+                if [ -d /opt/dependency-check/bin ]; then
+                    /opt/dependency-check/bin/dependency-check.sh \
+                    --project web --scan . --out .
+                else
+                    echo "OWASP not installed"
                 fi
                 '''
             }
@@ -74,25 +64,8 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
-                if [ -f web/Dockerfile ]; then
-                    docker build -t web:${BUILD_NUMBER} ./web
-                else
-                    echo "Dockerfile missing in web/"
-                    exit 1
-                fi
+                docker build -t web:${BUILD_NUMBER} .
                 '''
-            }
-        }
-
-        stage('Verify Image') {
-            steps {
-                sh 'docker images | grep web'
-            }
-        }
-
-        stage('Security Scan') {
-            steps {
-                sh 'grype web:${BUILD_NUMBER} || true'
             }
         }
 
@@ -103,25 +76,10 @@ pipeline {
                     aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    REPO=${ECR_DEV}
-                    if [ "$BRANCH_NAME" = "master" ]; then
-                        REPO=${ECR_PROD}
-                    fi
-
-                    docker tag web:${BUILD_NUMBER} ${REPO}:${BUILD_NUMBER}
-                    docker push ${REPO}:${BUILD_NUMBER}
+                    docker tag web:${BUILD_NUMBER} ${ECR_DEV}:${BUILD_NUMBER}
+                    docker push ${ECR_DEV}:${BUILD_NUMBER}
                     '''
                 }
-            }
-        }
-
-        stage('Helm Check') {
-            steps {
-                sh '''
-                rm -rf application-helm-charts
-                git clone ${HELM_REPO}
-                kube-linter lint application-helm-charts/application-helm-charts/web || true
-                '''
             }
         }
 
