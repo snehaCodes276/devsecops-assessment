@@ -11,10 +11,7 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
         HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
     }
-    tools {
-          sonarRunner 'sonar-scanner'
-    }
-
+    
     stages {
 
         stage('Clean') {
