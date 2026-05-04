@@ -24,26 +24,13 @@ pipeline {
             steps { checkout scm }
         }
 
-        stage('Verify Tools') {
-            steps {
-                sh '''
-                echo "Checking tools..."
-                docker --version || true
-                node -v || true
-                npm -v || true
-                sonar-scanner -v || true
-                kubectl version --client || true
-                '''
-            }
-        }
-
         stage('Install Dependencies') {
             steps {
                 sh '''
-                if [ -f package.json ]; then
-                    npm install || true
+                if [ -f web/package.json ]; then
+                    cd web && npm install
                 else
-                    echo "No package.json found - skipping npm"
+                    echo "No package.json found"
                 fi
                 '''
             }
@@ -55,14 +42,20 @@ pipeline {
                 stage('SonarQube') {
                     steps {
                         withSonarQubeEnv('sonarqube') {
-                            sh 'sonar-scanner -Dsonar.projectKey=web -Dsonar.sources=. || true'
+                            sh 'sonar-scanner -Dsonar.projectKey=web -Dsonar.sources=web'
                         }
                     }
                 }
 
                 stage('OWASP') {
                     steps {
-                        sh '/opt/dependency-check/bin/dependency-check.sh --project web --scan . --out . || true'
+                        sh '''
+                        if [ -d /opt/dependency-check/bin ]; then
+                            /opt/dependency-check/bin/dependency-check.sh --project web --scan . --out .
+                        else
+                            echo "OWASP missing"
+                        fi
+                        '''
                     }
                 }
             }
@@ -71,10 +64,8 @@ pipeline {
         stage('Tests') {
             steps {
                 sh '''
-                if [ -f package.json ]; then
-                    npm test || true
-                else
-                    echo "No tests found"
+                if [ -f web/package.json ]; then
+                    cd web && npm test || true
                 fi
                 '''
             }
@@ -82,35 +73,26 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                script {
-                    sh '''
-                    if [ -f Dockerfile ]; then
-                        docker build -t web:${BUILD_NUMBER} .
-                    else
-                        echo "Dockerfile missing - skipping build"
-                    fi
-                    '''
-                }
+                sh '''
+                if [ -f web/Dockerfile ]; then
+                    docker build -t web:${BUILD_NUMBER} ./web
+                else
+                    echo "Dockerfile missing in web/"
+                    exit 1
+                fi
+                '''
             }
         }
 
-        stage('Verify Docker Image') {
+        stage('Verify Image') {
             steps {
-                sh '''
-                docker images | grep web || echo "No image built"
-                '''
+                sh 'docker images | grep web'
             }
         }
 
         stage('Security Scan') {
             steps {
-                sh '''
-                if docker images | grep web:${BUILD_NUMBER}; then
-                    grype web:${BUILD_NUMBER} || true
-                else
-                    echo "Skipping scan - image not found"
-                fi
-                '''
+                sh 'grype web:${BUILD_NUMBER} || true'
             }
         }
 
@@ -126,12 +108,8 @@ pipeline {
                         REPO=${ECR_PROD}
                     fi
 
-                    if docker images | grep web:${BUILD_NUMBER}; then
-                        docker tag web:${BUILD_NUMBER} ${REPO}:${BUILD_NUMBER}
-                        docker push ${REPO}:${BUILD_NUMBER}
-                    else
-                        echo "No image to push"
-                    fi
+                    docker tag web:${BUILD_NUMBER} ${REPO}:${BUILD_NUMBER}
+                    docker push ${REPO}:${BUILD_NUMBER}
                     '''
                 }
             }
@@ -140,8 +118,8 @@ pipeline {
         stage('Helm Check') {
             steps {
                 sh '''
-                rm -rf application-helm-charts || true
-                git clone ${HELM_REPO} || true
+                rm -rf application-helm-charts
+                git clone ${HELM_REPO}
                 kube-linter lint application-helm-charts/application-helm-charts/web || true
                 '''
             }
@@ -149,7 +127,7 @@ pipeline {
 
         stage('EKS Check') {
             steps {
-                sh 'kubectl get nodes || true'
+                sh 'kubectl get nodes'
             }
         }
     }
