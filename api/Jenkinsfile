@@ -1,0 +1,152 @@
+pipeline {
+    agent { label 'slave' }
+
+    environment {
+        AWS_REGION = "ap-south-1"
+        SONARQUBE_ENV = "sonarqube"
+        SONAR_HOST_URL = "http://3.110.102.16:9000"
+        IMAGE_NAME = "api-app"
+        AWS_ACCOUNT_ID = "475790160792"
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps { cleanWs() }
+        }
+
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Set Environment') {
+            steps {
+                script {
+                    if (env.BRANCH_NAME == "develop") {
+                        env.ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-dev"
+                        env.NAMESPACE = "dev"
+                    } else {
+                        env.ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-prod"
+                        env.NAMESPACE = "prod"
+                    }
+                    env.IMAGE_TAG = "${env.GIT_COMMIT.take(6)}-${env.BUILD_NUMBER}"
+                }
+            }
+        }
+
+        stage('Debug Info') {
+            steps {
+                sh 'echo "Branch: $BRANCH_NAME"'
+                sh 'echo "Image: $ECR_REPO:$IMAGE_TAG"'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh 'pip install -r requirements.txt'
+            }
+        }
+
+        stage('Static Analysis & Security Scan') {
+            parallel {
+
+                stage('SonarQube') {
+                    steps {
+                        withSonarQubeEnv("${SONARQUBE_ENV}") {
+                            sh """
+                            sonar-scanner \
+                            -Dsonar.projectKey=api-app \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=${SONAR_HOST_URL}
+                            """
+                        }
+                    }
+                }
+
+                stage('OWASP Scan') {
+                    steps {
+                        sh """
+                        dependency-check.sh \
+                        --project api-app \
+                        --scan . \
+                        --format XML \
+                        --out .
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    script {
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK') {
+                            error "Quality Gate failed!"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                sh 'python test.py'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh """
+                docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                    sh """
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                    docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    docker push ${ECR_REPO}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Anchore Scan') {
+            steps {
+                sh """
+                grype ${ECR_REPO}:${IMAGE_TAG} -o json > anchore-scan.json
+                cat anchore-scan.json | jq '.matches[] | select(.vulnerability.severity=="Critical")' && exit 1 || echo "No critical vulnerabilities"
+                """
+            }
+        }
+
+        stage('Kubelinter') {
+            steps {
+                sh "kube-linter lint ."
+            }
+        }
+
+        stage('Integration Test') {
+            steps {
+                sh """
+                kubectl get pods -n ${NAMESPACE}
+                POD=$(kubectl get pods -n ${NAMESPACE} -o jsonpath='{.items[0].metadata.name}')
+                kubectl exec -n ${NAMESPACE} $POD -- echo "API running"
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '*.xml, *.json', allowEmptyArchive: true
+        }
+    }
+}
