@@ -37,16 +37,16 @@ pipeline {
         }
 
         stage('SonarQube') {
-            steps {
-                withSonarQubeEnv('sonarqube') {
-                    sh '''
-                    sonar-scanner \
-                    -Dsonar.projectKey=api \
-                    -Dsonar.sources=.
-                    '''
-                }
-            }
+    steps {
+        withSonarQubeEnv('sonarqube') {
+            sh '''
+            /opt/sonar-scanner/bin/sonar-scanner \
+              -Dsonar.projectKey=api \
+              -Dsonar.sources=.
+            '''
         }
+    }
+}
 
         stage('OWASP Scan') {
             steps {
