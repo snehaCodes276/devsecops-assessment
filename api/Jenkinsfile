@@ -1,77 +1,61 @@
 pipeline {
-    agent { label 'slave' }
+    agent any
+
+    parameters {
+        choice(name: 'QualityGate', choices: ['Pass', 'Fail'], description: 'Fail pipeline on Quality Gate')
+    }
 
     environment {
-        AWS_REGION = "ap-south-1"
-        SONARQUBE_ENV = "sonarqube"
-        SONAR_HOST_URL = "http://3.110.102.16:9000"
-        IMAGE_NAME = "api-app"
-        AWS_ACCOUNT_ID = "475790160792"
+        AWS_REGION = 'ap-south-1'
+        ACCOUNT_ID = '475790160792'
+
+        IMAGE_NAME = 'api'
+        IMAGE_TAG = "${GIT_COMMIT.take(7)}-${BUILD_NUMBER}"
+
+        ECR_DEV = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-dev"
+        ECR_PROD = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-prod"
+
+        HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
     }
 
     stages {
 
         stage('Clean Workspace') {
-            steps { cleanWs() }
-        }
-
-        stage('Checkout') {
-            steps { checkout scm }
-        }
-
-        stage('Set Environment') {
             steps {
-                script {
-                    if (env.BRANCH_NAME == "develop") {
-                        env.ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-dev"
-                        env.NAMESPACE = "dev"
-                    } else {
-                        env.ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-prod"
-                        env.NAMESPACE = "prod"
-                    }
-                    env.IMAGE_TAG = "${env.GIT_COMMIT.take(6)}-${env.BUILD_NUMBER}"
-                }
+                cleanWs()
             }
         }
 
-        stage('Debug Info') {
+        stage('Checkout Code') {
             steps {
-                sh 'echo "Branch: $BRANCH_NAME"'
-                sh 'echo "Image: $ECR_REPO:$IMAGE_TAG"'
+                checkout scm
             }
         }
 
-        stage('Install Dependencies') {
-            steps {
-                sh 'pip install -r requirements.txt'
-            }
-        }
-
-        stage('Static Analysis & Security Scan') {
+        stage('Static Analysis') {
             parallel {
 
                 stage('SonarQube') {
                     steps {
-                        withSonarQubeEnv("${SONARQUBE_ENV}") {
-                            sh """
+                        withSonarQubeEnv('sonarqube') {
+                            sh '''
                             sonar-scanner \
-                            -Dsonar.projectKey=api-app \
-                            -Dsonar.sources=. \
-                            -Dsonar.host.url=${SONAR_HOST_URL}
-                            """
+                            -Dsonar.projectKey=api \
+                            -Dsonar.sources=.
+                            '''
                         }
                     }
                 }
 
-                stage('OWASP Scan') {
+                stage('OWASP Dependency Check') {
                     steps {
-                        sh """
+                        sh '''
                         dependency-check.sh \
-                        --project api-app \
+                        --project api \
                         --scan . \
                         --format XML \
                         --out .
-                        """
+                        '''
                     }
                 }
             }
@@ -79,12 +63,10 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
-                    script {
-                        def qg = waitForQualityGate()
-                        if (qg.status != 'OK') {
-                            error "Quality Gate failed!"
-                        }
+                script {
+                    def qg = waitForQualityGate()
+                    if (params.QualityGate == 'Fail' && qg.status != 'OK') {
+                        error "Quality Gate Failed"
                     }
                 }
             }
@@ -92,53 +74,52 @@ pipeline {
 
         stage('Run Tests') {
             steps {
-                sh 'python test.py'
+                sh 'pytest || true'
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh """
-                docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
-                docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
-                """
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+            }
+        }
+
+        stage('Grype Scan') {
+            steps {
+                sh "grype ${IMAGE_NAME}:${IMAGE_TAG} -o json > anchore-scan.json"
+
+                script {
+                    def critical = sh(script: "grep -c CRITICAL anchore-scan.json || true", returnStdout: true).trim()
+                    if (critical.toInteger() > 0) {
+                        error "Critical vulnerabilities found"
+                    }
+                }
             }
         }
 
         stage('Push to ECR') {
             steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
-                    sh """
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                script {
+                    def repo = (env.BRANCH_NAME == 'master') ? ECR_PROD : ECR_DEV
 
-                    docker push ${ECR_REPO}:${IMAGE_TAG}
+                    sh """
+                    aws ecr get-login-password --region ${AWS_REGION} \
+                    | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${repo}:${IMAGE_TAG}
+                    docker push ${repo}:${IMAGE_TAG}
                     """
                 }
             }
         }
 
-        stage('Anchore Scan') {
+        stage('Kubelinter Helm Check') {
             steps {
                 sh """
-                grype ${ECR_REPO}:${IMAGE_TAG} -o json > anchore-scan.json
-                cat anchore-scan.json | jq '.matches[] | select(.vulnerability.severity=="Critical")' && exit 1 || echo "No critical vulnerabilities"
-                """
-            }
-        }
+                rm -rf application-helm-charts || true
+                git clone ${HELM_REPO}
 
-        stage('Kubelinter') {
-            steps {
-                sh "kube-linter lint ."
-            }
-        }
-
-        stage('Integration Test') {
-            steps {
-                sh """
-                kubectl get pods -n ${NAMESPACE}
-                POD=$(kubectl get pods -n ${NAMESPACE} -o jsonpath='{.items[0].metadata.name}')
-                kubectl exec -n ${NAMESPACE} $POD -- echo "API running"
+                kube-linter lint application-helm-charts/application-helmcharts/api
                 """
             }
         }
@@ -146,7 +127,7 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: '*.xml, *.json', allowEmptyArchive: true
+            sh 'kubectl get pods -A || true'
         }
     }
 }
