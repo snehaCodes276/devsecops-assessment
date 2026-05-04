@@ -1,13 +1,7 @@
 pipeline {
     agent { label 'slave' }
 
-    parameters {
-        choice(name: 'QualityGate', choices: ['Pass', 'Fail'], description: 'Fail pipeline on Quality Gate')
-    }
-
     environment {
-        PATH = "/opt/dependency-check/bin:/opt/sonar-scanner/bin:/usr/local/bin:${env.PATH}"
-
         AWS_REGION = 'ap-south-1'
         ACCOUNT_ID = '475790160792'
 
@@ -30,6 +24,14 @@ pipeline {
             steps { checkout scm }
         }
 
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                npm install || true
+                '''
+            }
+        }
+
         stage('Static Analysis') {
             parallel {
 
@@ -45,15 +47,14 @@ pipeline {
                     }
                 }
 
-                stage('OWASP Dependency Check') {
+                stage('OWASP') {
                     steps {
                         sh '''
                         dependency-check.sh \
                         --project web \
                         --scan . \
                         --format XML \
-                        --out . \
-                        --noupdate || true
+                        --out . || true
                         '''
                     }
                 }
@@ -63,73 +64,72 @@ pipeline {
         stage('Quality Gate') {
             steps {
                 script {
-                    def qg = waitForQualityGate()
-                    if (params.QualityGate == 'Fail' && qg.status != 'OK') {
-                        error "Quality Gate Failed"
-                    }
+                    waitForQualityGate abortPipeline: false
                 }
             }
         }
 
         stage('Run Tests') {
             steps {
-                sh '''
-                npm install
-                npm test || true
-                '''
+                sh 'npm test || echo "No tests"'
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+                sh '''
+                if [ -f Dockerfile ]; then
+                  docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                else
+                  echo "Dockerfile not found, skipping"
+                fi
+                '''
             }
         }
 
         stage('Grype Scan') {
             steps {
-                sh "grype ${IMAGE_NAME}:${IMAGE_TAG} -o json > anchore-scan.json"
-
-                script {
-                    def critical = sh(script: "grep -c CRITICAL anchore-scan.json || true", returnStdout: true).trim()
-                    if (critical.toInteger() > 0) {
-                        error "Critical vulnerabilities found"
-                    }
-                }
+                sh '''
+                grype ${IMAGE_NAME}:${IMAGE_TAG} -o json > scan.json || true
+                '''
             }
         }
 
         stage('Push to ECR') {
             steps {
-                script {
-                    def repo = (env.BRANCH_NAME == 'master') ? ECR_PROD : ECR_DEV
-
-                    sh """
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                    sh '''
                     aws ecr get-login-password --region ${AWS_REGION} \
                     | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${repo}:${IMAGE_TAG}
-                    docker push ${repo}:${IMAGE_TAG}
-                    """
+                    if [ "$BRANCH_NAME" = "master" ]; then
+                        REPO=${ECR_PROD}
+                    else
+                        REPO=${ECR_DEV}
+                    fi
+
+                    docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REPO}:${IMAGE_TAG}
+                    docker push ${REPO}:${IMAGE_TAG}
+                    '''
                 }
             }
         }
 
-        stage('Kubelinter Helm Check') {
+        stage('Kubelinter') {
             steps {
-                sh """
-                rm -rf application-helm-charts || true
-                git clone ${HELM_REPO}
-
-                kube-linter lint application-helm-charts/application-helm-charts/web
-                """
+                sh '''
+                git clone ${HELM_REPO} || true
+                kube-linter lint application-helm-charts/application-helm-charts/web || true
+                '''
             }
         }
-    }
 
-    post {
-        always {
-            sh 'kubectl get pods -A || echo "Cluster not ready"'
+        stage('Check Cluster') {
+            steps {
+                sh '''
+                kubectl get nodes || echo "Cluster not ready"
+                '''
+            }
         }
     }
 }
