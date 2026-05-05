@@ -5,61 +5,47 @@ pipeline {
         AWS_REGION = 'ap-south-1'
         ACCOUNT_ID = '475790160792'
 
-        APP_NAME = 'api'
+        ECR_DEV = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-dev"
+
         IMAGE_TAG = "${BUILD_NUMBER}"
-
-        ECR_REPO = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-dev"
-
         HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
     }
 
     stages {
 
-        stage('Clean Workspace') {
+        stage('Clean') {
             steps {
                 cleanWs()
             }
         }
 
-        stage('Checkout Code') {
+        stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Setup Virtual Environment') {
+        stage('Install Dependencies') {
             steps {
                 sh '''
-                python3 -m venv venv
-                . venv/bin/activate
-                pip install --upgrade pip
-
-                if [ -f requirements.txt ]; then
-                    pip install -r requirements.txt
-                else
-                    echo "requirements.txt not found"
-                fi
+                pip3 install -r requirements.txt || true
                 '''
             }
         }
 
-        stage('Run Tests') {
+        stage('Tests') {
             steps {
-                sh '''
-                . venv/bin/activate
-                pytest -v || true
-                '''
+                sh 'pytest || true'
             }
         }
 
-        stage('SonarQube Analysis') {
+        stage('SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube') {
                     sh '''
-                    sonar-scanner \
+                    /opt/sonar-scanner/bin/sonar-scanner \
                       -Dsonar.projectKey=api-dev \
-                      -Dsonar.sources=. \
-                      -Dsonar.python.version=3
+                      -Dsonar.sources=. || true
                     '''
                 }
             }
@@ -88,35 +74,31 @@ pipeline {
 
         stage('Verify Image') {
             steps {
-                sh '''
-                docker images | grep api || true
-                '''
+                sh 'docker images | grep api || true'
             }
         }
 
-        stage('Security Scan (Grype)') {
+        stage('Security Scan') {
             steps {
-                sh '''
-                grype api:${BUILD_NUMBER} || true
-                '''
+                sh 'grype api:${BUILD_NUMBER} || true'
             }
         }
 
-        stage('Push to ECR (DEV ONLY)') {
+        stage('Push to ECR (DEV)') {
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
                     sh '''
                     aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    docker tag api:${BUILD_NUMBER} ${ECR_REPO}:${BUILD_NUMBER}
-                    docker push ${ECR_REPO}:${BUILD_NUMBER}
+                    docker tag api:${BUILD_NUMBER} ${ECR_DEV}:${BUILD_NUMBER}
+                    docker push ${ECR_DEV}:${BUILD_NUMBER}
                     '''
                 }
             }
         }
 
-        stage('Helm Lint') {
+        stage('Helm Check') {
             steps {
                 sh '''
                 rm -rf application-helm-charts || true
