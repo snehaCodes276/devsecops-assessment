@@ -10,7 +10,7 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
         APP_DIR = 'web'
 
-        EKS_CLUSTER = 'your-eks-cluster-name'
+        EKS_CLUSTER = 'DevSecOps-Cluster'
         K8S_DEPLOYMENT = 'web-prod'
     }
 
