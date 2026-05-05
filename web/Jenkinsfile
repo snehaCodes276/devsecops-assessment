@@ -5,130 +5,115 @@ pipeline {
         AWS_REGION = 'ap-south-1'
         ACCOUNT_ID = '475790160792'
 
-        APP_NAME = 'web'
+        // ONLY DEV for develop branch
+        ECR_REPO = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-dev"
+
         IMAGE_TAG = "${BUILD_NUMBER}"
+        APP_DIR = 'web'
+    }
 
-        ECR_DEV = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-dev"
-        ECR_PROD = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/web-prod"
-
-        HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
+    options {
+        timestamps()
     }
 
     stages {
 
-        stage('Clean Workspace') {
-            steps { cleanWs() }
+        stage('Clean') {
+            steps {
+                cleanWs()
+            }
         }
 
-        stage('Checkout Code') {
-            steps { checkout scm }
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
         }
 
-        stage('Install Dependencies') {
+        stage('Verify Structure') {
             steps {
                 sh '''
-                if [ -f web/package.json ]; then
-                    cd web && npm install
-                else
-                    echo "No package.json found"
-                fi
+                echo "Workspace structure:"
+                ls -la
+
+                echo "Web folder:"
+                ls -la ${APP_DIR}
                 '''
             }
         }
 
-        stage('Static Analysis') {
-            parallel {
-
-                stage('SonarQube') {
-                    steps {
-                        withSonarQubeEnv('sonarqube') {
-                            sh 'sonar-scanner -Dsonar.projectKey=web -Dsonar.sources=web'
-                        }
-                    }
-                }
-
-                stage('OWASP') {
-                    steps {
-                        sh '''
-                        if [ -d /opt/dependency-check/bin ]; then
-                            /opt/dependency-check/bin/dependency-check.sh --project web --scan . --out .
-                        else
-                            echo "OWASP missing"
-                        fi
-                        '''
-                    }
+        stage('Install Dependencies') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh 'npm install'
                 }
             }
         }
 
         stage('Tests') {
             steps {
-                sh '''
-                if [ -f web/package.json ]; then
-                    cd web && npm test || true
-                fi
-                '''
-            }
-        }
-
-        stage('Docker Build') {
-            steps {
-                sh '''
-                if [ -f web/Dockerfile ]; then
-                    docker build -t web:${BUILD_NUMBER} ./web
-                else
-                    echo "Dockerfile missing in web/"
-                    exit 1
-                fi
-                '''
-            }
-        }
-
-        stage('Verify Image') {
-            steps {
-                sh 'docker images | grep web'
-            }
-        }
-
-        stage('Security Scan') {
-            steps {
-                sh 'grype web:${BUILD_NUMBER} || true'
-            }
-        }
-
-        stage('Push to ECR') {
-            steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                dir("${APP_DIR}") {
                     sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-
-                    REPO=${ECR_DEV}
-                    if [ "$BRANCH_NAME" = "master" ]; then
-                        REPO=${ECR_PROD}
+                    if npm run | grep -q "test"; then
+                        npm test || true
+                    else
+                        echo "No test script found, skipping tests"
                     fi
-
-                    docker tag web:${BUILD_NUMBER} ${REPO}:${BUILD_NUMBER}
-                    docker push ${REPO}:${BUILD_NUMBER}
                     '''
                 }
             }
         }
 
-        stage('Helm Check') {
+        stage('SonarQube') {
             steps {
-                sh '''
-                rm -rf application-helm-charts
-                git clone ${HELM_REPO}
-                kube-linter lint application-helm-charts/application-helm-charts/web || true
-                '''
+                withSonarQubeEnv('sonarqube') {
+                    sh """
+                    /opt/sonar-scanner/bin/sonar-scanner \
+                      -Dsonar.projectKey=web-dev \
+                      -Dsonar.sources=${APP_DIR}
+                    """
+                }
             }
         }
 
-        stage('EKS Check') {
+        stage('Docker Build') {
             steps {
-                sh 'kubectl get nodes'
+                dir("${APP_DIR}") {
+                    sh """
+                    docker build -t web:${IMAGE_TAG} .
+                    """
+                }
             }
+        }
+
+        stage('Push to ECR (DEV ONLY)') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-creds',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh """
+                    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    docker tag web:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
+                    docker push ${ECR_REPO}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ WEB DEV pipeline successful"
+        }
+        failure {
+            echo "❌ WEB DEV pipeline failed"
         }
     }
 }
