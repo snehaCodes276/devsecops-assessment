@@ -1,20 +1,15 @@
-# Using official python runtime base image
-FROM python:3.10.5-alpine3.16
+FROM python:3.10-alpine
 
-# Set the application directory
 WORKDIR /app
 
-RUN apk add --no-cache entr postgresql-dev musl-dev gcc
+RUN apk add --no-cache gcc musl-dev postgresql-dev
 
-# Install our requirements.txt
-COPY requirements.txt /app/requirements.txt
-RUN pip install -r requirements.txt
+COPY requirements.txt .
 
-# Copy our code from the current folder to /app inside the container
-COPY . /app
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Make port 80 available for links and/or publish
-EXPOSE 80
+COPY . .
 
-# Define our command to be run when launching the container
-CMD ["gunicorn", "app:app", "-b", "0.0.0.0:8080", "--log-file", "-", "--access-logfile", "-", "--workers", "4", "--keep-alive", "0"]
+EXPOSE 8080
+
+CMD ["gunicorn", "app:app", "-b", "0.0.0.0:8080", "--workers", "4"]
