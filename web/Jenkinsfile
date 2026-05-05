@@ -110,7 +110,7 @@ pipeline {
 
     post {
         always {
-            cleanWs(onlyIfSuccessful: false)
+            cleanWs()
         }
         success {
             echo "✅ WEB MASTER DEPLOYED SUCCESSFULLY TO EKS (PROD)"
