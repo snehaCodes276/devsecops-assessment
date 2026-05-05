@@ -50,19 +50,19 @@ pipeline {
         }
 
         stage('Tests') {
-            steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                    if npm run | grep -q "test"; then
-                        echo "Running tests..."
-                        npm test
-                    else
-                        echo "No tests found, continuing..."
-                    fi
-                    '''
-                }
-            }
-        }
+    steps {
+        dir("${APP_DIR}") {
+            sh '''
+            if [ "$(npm pkg get scripts.test)" = "null" ]; then
+                echo "No test script found, skipping..."
+            else
+                echo "Running tests..."
+                npm test
+            fi
+            '''
+                          }
+          }
+                       } 
 
         stage('SonarQube') {
             steps {
