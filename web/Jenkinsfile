@@ -9,6 +9,9 @@ pipeline {
 
         IMAGE_TAG = "${BUILD_NUMBER}"
         APP_DIR = 'web'
+
+        EKS_CLUSTER = 'your-eks-cluster-name'
+        K8S_DEPLOYMENT = 'web-prod'
     }
 
     options {
@@ -32,10 +35,10 @@ pipeline {
         stage('Verify Structure') {
             steps {
                 sh '''
-                echo "Workspace contents:"
+                echo "Workspace:"
                 ls -la
 
-                echo "Web app contents:"
+                echo "Web folder:"
                 ls -la ${APP_DIR}
                 '''
             }
@@ -44,9 +47,7 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 dir("${APP_DIR}") {
-                    sh '''
-                    npm install || true
-                    '''
+                    sh 'npm install || true'
                 }
             }
         }
@@ -58,7 +59,7 @@ pipeline {
                     if npm run | grep -q test; then
                         npm test || true
                     else
-                        echo "No tests found, skipping"
+                        echo "No tests found"
                     fi
                     '''
                 }
@@ -68,11 +69,11 @@ pipeline {
         stage('SonarQube') {
             steps {
                 withSonarQubeEnv('sonarqube') {
-                    sh '''
+                    sh """
                     /opt/sonar-scanner/bin/sonar-scanner \
                       -Dsonar.projectKey=web-prod \
-                      -Dsonar.sources=web
-                    '''
+                      -Dsonar.sources=${APP_DIR}
+                    """
                 }
             }
         }
@@ -82,7 +83,7 @@ pipeline {
                 sh '''
                 if [ -d /opt/dependency-check/bin ]; then
                     /opt/dependency-check/bin/dependency-check.sh \
-                    --project web-prod --scan web --out . || true
+                    --project web-prod --scan ${APP_DIR} --out . || true
                 else
                     echo "OWASP not installed"
                 fi
@@ -93,9 +94,9 @@ pipeline {
         stage('Docker Build') {
             steps {
                 dir("${APP_DIR}") {
-                    sh '''
+                    sh """
                     docker build -t web:${IMAGE_TAG} .
-                    '''
+                    """
                 }
             }
         }
@@ -107,13 +108,36 @@ pipeline {
                     usernameVariable: 'AWS_ACCESS_KEY_ID',
                     passwordVariable: 'AWS_SECRET_ACCESS_KEY'
                 )]) {
-                    sh '''
+                    sh """
+                    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+
                     aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
                     docker tag web:${IMAGE_TAG} ${ECR_PROD}:${IMAGE_TAG}
                     docker push ${ECR_PROD}:${IMAGE_TAG}
-                    '''
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to EKS (PROD)') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-creds',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh """
+                    export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                    export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+
+                    aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER}
+
+                    kubectl set image deployment/${K8S_DEPLOYMENT} \
+                    web=${ECR_PROD}:${IMAGE_TAG} -n default
+                    """
                 }
             }
         }
@@ -121,10 +145,10 @@ pipeline {
 
     post {
         success {
-            echo "✅ WEB MASTER pipeline SUCCESS (PROD deployed)"
+            echo "✅ WEB MASTER DEPLOYED TO EKS (PROD)"
         }
         failure {
-            echo "❌ WEB MASTER pipeline FAILED"
+            echo "❌ WEB MASTER PIPELINE FAILED"
         }
     }
 }
