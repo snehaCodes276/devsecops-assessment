@@ -71,7 +71,7 @@ pipeline {
         withSonarQubeEnv('sonarqube') {
             sh '''
             /opt/sonar-scanner/bin/sonar-scanner \
-              -Dsonar.projectKey=api \
+              -Dsonar.projectKey=web \
               -Dsonar.sources=.
             '''
                                       }
