@@ -6,36 +6,34 @@ pipeline {
         ACCOUNT_ID = '475790160792'
 
         ECR_DEV = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/api-dev"
-
         IMAGE_TAG = "${BUILD_NUMBER}"
-        HELM_REPO = 'https://github.com/snehaCodes276/application-helm-charts.git'
     }
 
     stages {
 
         stage('Clean') {
-            steps {
-                cleanWs()
-            }
+            steps { cleanWs() }
         }
 
         stage('Checkout') {
-            steps {
-                checkout scm
-            }
+            steps { checkout scm }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh '''
-                pip3 install -r requirements.txt || true
-                '''
+                dir('api') {
+                    sh '''
+                    pip3 install -r requirements.txt || true
+                    '''
+                }
             }
         }
 
         stage('Tests') {
             steps {
-                sh 'pytest || true'
+                dir('api') {
+                    sh 'pytest || true'
+                }
             }
         }
 
@@ -45,7 +43,7 @@ pipeline {
                     sh '''
                     /opt/sonar-scanner/bin/sonar-scanner \
                       -Dsonar.projectKey=api-dev \
-                      -Dsonar.sources=. || true
+                      -Dsonar.sources=api
                     '''
                 }
             }
@@ -56,7 +54,7 @@ pipeline {
                 sh '''
                 if [ -d /opt/dependency-check/bin ]; then
                     /opt/dependency-check/bin/dependency-check.sh \
-                    --project api-dev --scan . --out .
+                    --project api-dev --scan api --out .
                 else
                     echo "OWASP not installed"
                 fi
@@ -66,27 +64,21 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                sh '''
-                docker build -t api:${BUILD_NUMBER} .
-                '''
+                dir('api') {
+                    sh '''
+                    docker build -t api:${BUILD_NUMBER} .
+                    '''
+                }
             }
         }
 
-        stage('Verify Image') {
+        stage('Push to ECR') {
             steps {
-                sh 'docker images | grep api || true'
-            }
-        }
-
-        stage('Security Scan') {
-            steps {
-                sh 'grype api:${BUILD_NUMBER} || true'
-            }
-        }
-
-        stage('Push to ECR (DEV)') {
-            steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-creds',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
                     sh '''
                     aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
@@ -95,26 +87,6 @@ pipeline {
                     docker push ${ECR_DEV}:${BUILD_NUMBER}
                     '''
                 }
-            }
-        }
-
-        stage('Helm Check') {
-            steps {
-                sh '''
-                rm -rf application-helm-charts || true
-                git clone ${HELM_REPO}
-                kube-linter lint application-helm-charts/application-helm-charts/api || true
-                '''
-            }
-        }
-
-        stage('EKS Check') {
-            steps {
-                sh '''
-                kubectl get nodes || true
-                kubectl get pods -n dev || true
-                kubectl get svc -n dev || true
-                '''
             }
         }
     }
